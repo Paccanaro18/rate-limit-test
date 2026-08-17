@@ -3,6 +3,9 @@ package com.paccanaro.ratelimit.service;
 import com.paccanaro.ratelimit.dto.RateLimitRequest;
 import com.paccanaro.ratelimit.dto.RateLimitResponse;
 import com.paccanaro.ratelimit.exception.RedisIndisponivelException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -12,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 @Service
 public class RateLimitService {
 
+    private static final Logger log = LoggerFactory.getLogger(RateLimitService.class);
 
     private final RedisTemplate<String, String> redisTemplate;
     private static final String PREFIXO_TOKENS = "rate_limit:%s:tokens";
@@ -19,12 +23,21 @@ public class RateLimitService {
 
     public RateLimitService(RedisTemplate<String, String> redisTemplate) {
         this.redisTemplate = redisTemplate;
+        log.info("RateLimitService iniciado com RedisTemplate={} / connectionFactory={}",
+                redisTemplate.getClass().getName(),
+                redisTemplate.getConnectionFactory() == null
+                        ? "NULO"
+                        : redisTemplate.getConnectionFactory().getClass().getName());
     }
 
     public RateLimitResponse verificarLimite(RateLimitRequest requisicao) {
         try {
             String chaveTokens = String.format(PREFIXO_TOKENS, requisicao.ip());
             String chaveReset = String.format(PREFIXO_RESET, requisicao.ip());
+
+            log.debug("Verificando limite ip={} limite={} janela={}s (chaves: {} / {})",
+                    requisicao.ip(), requisicao.limite(), requisicao.windowSeconds(),
+                    chaveTokens, chaveReset);
 
             long tempoAtual = Instant.now().getEpochSecond();
             long tempoReset = obterTempoReset(chaveReset, tempoAtual, requisicao.windowSeconds());
@@ -54,8 +67,13 @@ public class RateLimitService {
                         tempoEspera > 0 ? tempoEspera : 1
                 );
             }
-        } catch (Exception e) {
+        } catch (DataAccessException e) {
+            log.error("Falha de acesso ao Redis para ip={}", requisicao.ip(), e);
             throw new RedisIndisponivelException("Erro ao conectar com Redis", e);
+        } catch (RuntimeException e) {
+            // Não é falha de conexão: antes virava 503 "Redis desconectado" e escondia o bug real.
+            log.error("Erro inesperado ao aplicar rate limit para ip={}", requisicao.ip(), e);
+            throw e;
         }
     }
 
